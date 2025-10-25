@@ -9,13 +9,11 @@ from sklearn.svm import SVC
 import urllib.parse
 from typing import List, Dict, Any
 from collections import Counter
-import socket # Already imported
+import socket
 
-# --- PROJECT CHIMERA v6.2: DYNAMIC LOCAL IP FIX ---
-# Focus: Dynamically determine the machine's local IP address to correctly identify 
-# when the user is attacking the local DDoSEngine, regardless of the hostname used.
-
-# (USER_AGENTS, REFERERS, COMMON_PATHS classes remain unchanged)
+# --- PROJECT CHIMERA v6.3: GUARANTEED LOCAL ATTACK MODE ---
+# This version uses a simple string check to ensure that the live DDoSEngine
+# starts and is attacked when the user uses the default local address.
 
 # --- USER-DEFINED DATA (FOR TESTING) ---
 USER_AGENTS = [
@@ -33,6 +31,9 @@ REFERERS = [
 COMMON_PATHS = [
     '/', '/product/details', '/checkout', '/api/search', '/about', '/contact', '/login', '/cart', '/blog'
 ]
+# --- Define the ONLY URL that runs the DDoSEngine locally ---
+LOCAL_TARGET_URL = "http://127.0.0.1:8080"
+
 
 # --- 1. THE DEFENSE/TARGET SYSTEM ---
 class DDoSEngine:
@@ -60,7 +61,7 @@ class DDoSEngine:
         await self.runner.setup()
         site = web.TCPSite(self.runner, host, port)
         await site.start()
-        print(f"DEFENSE: Target server listening on http://{host}:{port}")
+        print(f"DEFENSE: Target server listening on {LOCAL_TARGET_URL}")
 
 # --- 2. THE SIMULATED STRESS TESTER (Project Chimera Attack) ---
 class AttackSimulation:
@@ -71,48 +72,12 @@ class AttackSimulation:
     """
     def __init__(self, target_url: str):
         self.target_url = target_url
-        # Added a robust check for local target to prevent accidental simulation mode
-        self.is_local_target = self._check_is_local(target_url)
+        # Explicit check against the defined local target URL
+        self.is_local_target = self.target_url == LOCAL_TARGET_URL
         self.active_connections = 0
         self.total_attempts = 0
         self.ip_pool: List[str] = [self._generate_simulated_ip() for _ in range(100)] 
         
-    def _get_local_ip(self) -> str:
-        """Attempts to find the non-loopback IP address of the machine."""
-        try:
-            # Connect to an outside resource (Google DNS) to find the outbound interface's IP
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-            s.close()
-            return ip
-        except Exception:
-            # Fallback to localhost if network connection fails
-            return '127.0.0.1'
-
-
-    def _check_is_local(self, url: str) -> bool:
-        """Determines if the URL points to the local host, including dynamic local IPs."""
-        try:
-            parsed = urllib.parse.urlparse(url)
-            hostname = parsed.hostname
-            
-            # 1. Standard local addresses
-            local_addresses = {'localhost', '127.0.0.1', self._get_local_ip()}
-            
-            # 2. Add the host's actual IP if it can be resolved
-            if hostname:
-                try:
-                    resolved_ip = socket.gethostbyname(hostname)
-                    local_addresses.add(resolved_ip)
-                except:
-                    pass # Ignore resolution errors
-
-            # Check if the target hostname or its resolved IP is one of our local addresses
-            return hostname in local_addresses or parsed.netloc.startswith(tuple(local_addresses))
-        except:
-            return False
-
     def _generate_simulated_ip(self) -> str:
         """Generates a random, non-routable IP address for simulation (192.168.x.x)."""
         return f"192.168.{random.randint(1, 255)}.{random.randint(1, 255)}"
@@ -159,8 +124,6 @@ class AttackSimulation:
         self.total_attempts += 1
         
         try:
-            # Note: For external sites, the WAF will likely block this instantly 
-            # (as observed), but we rely on the local simulation to show AI detection.
             async with session.get(url, headers=headers, timeout=5) as response:
                 if response.status >= 400:
                     return False 
@@ -298,9 +261,10 @@ class AnomalyDetection:
 
 # --- MAIN EXECUTION ---
 async def main():
+    target_url = ""
     if len(sys.argv) < 2:
-        print("Usage: python ddos_tool_and_detector.py <http://localhost:8080> or <https://target.com>")
-        target_url = "http://127.0.0.1:8080"
+        print(f"Usage: python ddos_tool_and_detector.py <{LOCAL_TARGET_URL}> or <https://target.com>")
+        target_url = LOCAL_TARGET_URL
         print(f"INFO: No URL provided. Defaulting target to the local defense engine: {target_url}")
     else:
         target_url = sys.argv[1]
