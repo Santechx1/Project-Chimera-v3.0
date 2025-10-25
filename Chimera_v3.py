@@ -9,15 +9,15 @@ from sklearn.svm import SVC
 import urllib.parse
 from typing import List, Dict, Any
 from collections import Counter
-import socket
+import socket # Already imported
 
-# --- PROJECT CHIMERA v6.0: AI DETECTION FOCUS ---
-# This version focuses on demonstrating the AI's ability to detect the HULK-style
-# attack behavior, assuming a stealth client (with correct TLS/JS fingerprint) is used.
-# Evasion attempts are now consolidated into high, sustained traffic simulation.
+# --- PROJECT CHIMERA v6.2: DYNAMIC LOCAL IP FIX ---
+# Focus: Dynamically determine the machine's local IP address to correctly identify 
+# when the user is attacking the local DDoSEngine, regardless of the hostname used.
 
-# --- HULK Evasion Data ---
-# Massive, randomized lists confuse basic WAF signature matching.
+# (USER_AGENTS, REFERERS, COMMON_PATHS classes remain unchanged)
+
+# --- USER-DEFINED DATA (FOR TESTING) ---
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15',
@@ -71,11 +71,48 @@ class AttackSimulation:
     """
     def __init__(self, target_url: str):
         self.target_url = target_url
-        self.is_local_target = target_url == "http://127.0.0.1:8080"
+        # Added a robust check for local target to prevent accidental simulation mode
+        self.is_local_target = self._check_is_local(target_url)
         self.active_connections = 0
         self.total_attempts = 0
         self.ip_pool: List[str] = [self._generate_simulated_ip() for _ in range(100)] 
         
+    def _get_local_ip(self) -> str:
+        """Attempts to find the non-loopback IP address of the machine."""
+        try:
+            # Connect to an outside resource (Google DNS) to find the outbound interface's IP
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except Exception:
+            # Fallback to localhost if network connection fails
+            return '127.0.0.1'
+
+
+    def _check_is_local(self, url: str) -> bool:
+        """Determines if the URL points to the local host, including dynamic local IPs."""
+        try:
+            parsed = urllib.parse.urlparse(url)
+            hostname = parsed.hostname
+            
+            # 1. Standard local addresses
+            local_addresses = {'localhost', '127.0.0.1', self._get_local_ip()}
+            
+            # 2. Add the host's actual IP if it can be resolved
+            if hostname:
+                try:
+                    resolved_ip = socket.gethostbyname(hostname)
+                    local_addresses.add(resolved_ip)
+                except:
+                    pass # Ignore resolution errors
+
+            # Check if the target hostname or its resolved IP is one of our local addresses
+            return hostname in local_addresses or parsed.netloc.startswith(tuple(local_addresses))
+        except:
+            return False
+
     def _generate_simulated_ip(self) -> str:
         """Generates a random, non-routable IP address for simulation (192.168.x.x)."""
         return f"192.168.{random.randint(1, 255)}.{random.randint(1, 255)}"
@@ -141,9 +178,9 @@ class AttackSimulation:
         
         if not self.is_local_target:
              print("SIMULATION: Assuming a Stealth TLS Client successfully bypassed WAF/JS challenge.")
-             print("           Running internal simulation to demonstrate AI Detection capability.")
-             # If external, we only simulate the high load profile
-             await asyncio.sleep(100000) # Sleep indefinitely to hold the monitoring loop.
+             print("           Running internal AI load simulation...")
+             # Sleep indefinitely to hold the monitoring loop.
+             await asyncio.sleep(100000) 
 
         async with ClientSession() as session:
             tasks = []
@@ -165,7 +202,7 @@ class AttackSimulation:
 class MetricsTracker:
     """Collects metrics, including the critical URL Entropy score."""
     def __init__(self):
-        self.metrics: Dict[str, float] = {'rate': 0, 'conns': 0, 'ips': 0, 'entropy': 0.0}
+        self.metrics: Dict[str, float] = {'rate': 0, 'conns': 0, 'ips': 0, 'entropy': 0.0, 'total_rcvd_sim': 0}
         self.last_count = 0
         self.last_time = time.time()
         self.local_url_history: List[str] = []
@@ -215,7 +252,7 @@ class MetricsTracker:
         
     def get_metrics(self) -> List[float]:
         """Returns metrics as a list for ML input."""
-        return list(self.metrics.values())
+        return list(self.metrics.values())[0:4] # Only return the four features for ML
 
     def get_metrics_dict(self) -> Dict[str, float]:
         """Returns metrics as a dictionary for display."""
@@ -254,12 +291,15 @@ class AnomalyDetection:
         if len(new_data) != 4:
             # Handle cases where data is incomplete during startup
             return 0 
+        # Check if rate is zero, if so, it's not a live attack, so don't predict attack
+        if new_data[0] < 10:
+             return 0
         return self.model.predict([new_data])[0]
 
 # --- MAIN EXECUTION ---
 async def main():
     if len(sys.argv) < 2:
-        print("Usage: python ddos_tool_and_detector.py <https://target-url>")
+        print("Usage: python ddos_tool_and_detector.py <http://localhost:8080> or <https://target.com>")
         target_url = "http://127.0.0.1:8080"
         print(f"INFO: No URL provided. Defaulting target to the local defense engine: {target_url}")
     else:
@@ -267,13 +307,14 @@ async def main():
         if not target_url.startswith(('https://', 'http://')):
              target_url = 'https://' + target_url
 
-    is_local_target = target_url == "http://127.0.0.1:8080"
     
     # Initialize all components
     defense_engine = DDoSEngine()
     metrics_tracker = MetricsTracker()
     detector = AnomalyDetection()
     attack_sim = AttackSimulation(target_url)
+    
+    is_local_target = attack_sim.is_local_target
 
     # 1. Setup Defense System (Target Web Server and AI Detector)
     detector.train()
@@ -281,48 +322,52 @@ async def main():
     # Only run the local defense server if the target is local
     if is_local_target:
         print("\nSTARTING LOCAL DDoSEngine (Target Server)...")
-        asyncio.create_task(defense_engine.create_server())
-        
-    await asyncio.sleep(2) # Give time for setup
+        # Ensure the server starts as a background task
+        server_task = asyncio.create_task(defense_engine.create_server())
+        await asyncio.sleep(2) # Give time for server to bind
 
     # 2. Start the Attack Simulation
     if is_local_target:
         # Attack the local server successfully to demonstrate detection
+        print("\n--- BEGIN LIVE ATTACK ON LOCAL TARGET ---")
         attack_task = asyncio.create_task(attack_sim.start_flood(num_tasks=300))
     else:
-        # For external target, run a small task to test connection briefly and then rely on simulation assumption
+        # For external target, run a small task to test connection briefly
         print(f"\nSTRESS TEST: Attempting connection to external URL: {target_url}...")
-        # Brief actual connection attempt
+        
         async with ClientSession() as session:
             try:
-                await attack_sim.send_hulk_request(session, attack_sim.ip_pool[0])
+                # Use a high timeout for the single test to give the WAF a chance to respond
+                await asyncio.wait_for(attack_sim.send_hulk_request(session, attack_sim.ip_pool[0]), timeout=10)
             except:
                 pass # Ignore connection failure, as expected
         
         print("\nEXTERNAL CONNECTION FAILED (WAF/TLS Block).")
         print("Switching to internal AI simulation to demonstrate detection...")
         print("---------------------------------------------------------------")
-        # Run the simulation logic to demonstrate AI detection
-        attack_task = asyncio.create_task(attack_sim.start_flood(num_tasks=0)) 
+        
+        # -------------------------------------------------------------
+        # Inject simulated attack data for the AI to detect
+        defense_engine.request_count = 800 # High simulated Total Rcvd count
+        metrics_tracker.metrics['rate'] = 800.0 # High simulated Rate
+        metrics_tracker.metrics['conns'] = 200.0 # Many connections
+        metrics_tracker.metrics['entropy'] = 4.20 # High Entropy (HULK signature)
+        # We don't need a live attack task for the external simulation
+        attack_task = None
+        # -------------------------------------------------------------
         
     
     # 3. Continuous Monitoring Loop
     print("\n--- BEGIN AI MONITORING LOOP (PROJECT CHIMERA) ---")
     
-    # --- Local Simulation Data Injection for External Target ---
-    if not is_local_target:
-        # Inject simulated attack data for the AI to detect
-        print("INJECTING SIMULATED ATTACK PROFILE FOR AI TRAINING...")
-        defense_engine.request_count = 800 # High Rate
-        attack_sim.active_connections = 200 # Many connections
-        metrics_tracker.metrics['entropy'] = 4.2 # High Entropy (HULK signature)
-        
-    
-    # --- Monitoring and Prediction Loop ---
     while True:
         if is_local_target:
+            # Update metrics based on live traffic
             metrics_tracker.update(attack_sim, defense_engine)
-        
+        else:
+            # For external target, the metrics are the fixed injected values
+            pass
+
         current_metrics = metrics_tracker.get_metrics()
         current_metrics_dict = metrics_tracker.get_metrics_dict()
         
@@ -330,22 +375,17 @@ async def main():
             await asyncio.sleep(1)
             continue
 
-        # In the external simulation, we feed the injected data directly
-        if not is_local_target:
-             current_metrics = [
-                 defense_engine.request_count, 
-                 attack_sim.active_connections, 
-                 current_metrics_dict['ips'], 
-                 current_metrics_dict['entropy']
-             ]
-
         prediction = detector.predict(current_metrics)
+        
+        # Display logic needs to handle both live and simulated data
+        display_rate = current_metrics_dict['rate']
+        display_total_rcvd = defense_engine.request_count
         
         status = "NORMAL" if prediction == 0 else "!!! APPLICATION LAYER ATTACK DETECTED !!!"
         color_code = '\033[92m' if prediction == 0 else '\033[91m'
         
         # Display real-time data
-        print(f"\r{color_code}STATUS: {status:<45} | Rate: {current_metrics_dict['rate'] if is_local_target else current_metrics_dict['rate']:.0f} rps | IPs: {current_metrics_dict['ips']:<3} (Pool) | Entropy: {current_metrics_dict['entropy']:.2f} | Total Rcvd: {defense_engine.request_count}\033[0m", end="", flush=True)
+        print(f"\r{color_code}STATUS: {status:<45} | Rate: {display_rate:.0f} rps | IPs: {current_metrics_dict['ips']:<3} (Pool) | Entropy: {current_metrics_dict['entropy']:.2f} | Total Rcvd: {display_total_rcvd}\033[0m", end="", flush=True)
         
         await asyncio.sleep(1) 
 
